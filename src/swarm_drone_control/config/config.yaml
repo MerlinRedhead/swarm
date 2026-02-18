@@ -1,0 +1,61 @@
+/**:
+  ros__parameters:
+    target_alt: 50.0  # Базовая высота миссии
+    safe_alt: 100.0   # Высота при потере связи
+
+# --- ЗРЕНИЕ (3 дрона, 15м за Хабом) ---
+vision_1:
+  ros__parameters:
+    offset_x: -15.0
+    offset_y: -15.0
+    alt_step: 0.0
+
+vision_2:
+  ros__parameters:
+    offset_x: 0.0
+    offset_y: -15.0
+    alt_step: 0.0
+
+vision_3:
+  ros__parameters:
+    offset_x: 15.0
+    offset_y: -15.0
+    alt_step: 0.0
+
+# --- УДАРНИКИ (4 дрона) ---
+striker_1: # За боковым левым (vision_1)
+  ros__parameters:
+    offset_x: -15.0
+    offset_y: -35.0
+    alt_step: -5.0
+
+striker_2: # Слева от центра
+  ros__parameters:
+    offset_x: -7.0
+    offset_y: -35.0
+    alt_step: -5.0
+
+striker_3: # Справа от центра
+  ros__parameters:
+    offset_x: 7.0
+    offset_y: -50.0
+    alt_step: -5.0
+
+striker_4: # За боковым правым (vision_3)
+  ros__parameters:
+    offset_x: 15.0
+    offset_y: -50.0
+    alt_step: -5.0
+
+# --- СВЯЗЬ (2 дрона) ---
+connect_1: # Сразу за центром
+  ros__parameters:
+    offset_x: 0.0
+    offset_y: -45.0
+    alt_step: 15.0
+
+connect_2: # Дальний ретранслятор
+  ros__parameters:
+    offset_x: 0.0
+    offset_y: -150.0
+    alt_step: 30.0

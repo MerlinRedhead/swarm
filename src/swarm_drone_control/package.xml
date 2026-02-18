@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>swarm_drone_control</name>
+  <version>1.0.0</version>
+  <description>Drone control logic: vision, striker and hub relay</description>
+  <maintainer email="merlin@swarm.local">merlin</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>mavros_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf_transformations</depend>
+  <depend>swarm_formation</depend> <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

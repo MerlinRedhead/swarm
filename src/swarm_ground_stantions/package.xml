@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>swarm_ground_stantions</name>
+  <version>1.0.0</version>
+  <description>Ground Station and YOLO</description>
+  <maintainer email="merlin@todo.todo">merlin</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>swarm_formation</depend> <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
