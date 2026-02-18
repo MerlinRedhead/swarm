@@ -219,12 +219,24 @@ class StreamProcessor:
                         cv2.putText(frame, label, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
             # --- ОТПРАВКА ОБРАБОТАННОГО КАДРА В СЕТЬ ---
+            # Перед processing - инициализация FPS
+            if not hasattr(self, 'processed_frames'):
+                self.processed_frames = 0
+                self.start_time = time.time()
+            
+            if self.processed_frames % 100 == 0:
+                elapsed = time.time() - self.start_time
+                fps = self.processed_frames / elapsed if elapsed > 0 else 0
+                self.node.get_logger().info(f"[{self.agent_id}] FPS: {fps:.1f}")
+
             try:
-                process.stdin.write(frame.tobytes())
+                processor.stdin.write(frame.tobytes())
             except BrokenPipeError:
-                self.node.get_logger().error(f"[{self.agent_id}] FFmpeg Pipe Broken!")
-                # Перезапуск FFmpeg можно реализовать здесь, но проще перезапустить ноду
+                self.node.get_logger().error(f"[{self.agent_id[лежит}] FFmpeg Pipe Broken!")
+                # Пере蚂蚁запуск FFmpeg можно реализовать здесь, но проще перезапустить ноду
                 break
+
+            self.processed_frames += 1
 
         # Очистка ресурсов
         cap.release()
@@ -300,9 +312,11 @@ class YoloProcessor(Node):
         # 2. Если это новый РАЗВЕДЧИК или УДАРНИК (который стримит)
         # Проверяем, запущен ли уже обработчик
         if aid not in self.streams and ("vision" in aid or "striker" in aid):
-            self.get_logger().info(f"NEW STREAM DETECTED: {aid}")
-            processor = StreamProcessor(aid, self.model, self, self.buffers[aid])
-            self.streams[aid] = processor
+            with self.lock:
+                if aid not in self.streams:
+                    self.get_logger().info(f"NEW STREAM DETECTED: {aid}")
+                    processor = StreamProcessor(aid, self.model, self, self.buffers[aid])
+     self.streams[aid] = processor
 
     def destroy_node(self):
         self.get_logger().info("SHUTTING DOWN STREAMS...")
