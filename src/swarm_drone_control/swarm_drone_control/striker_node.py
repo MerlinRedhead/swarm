@@ -7,6 +7,7 @@ import time
 import subprocess
 import os
 import signal
+import asyncio
 from cv_bridge import CvBridge
 
 # ROS Messages
@@ -95,7 +96,8 @@ class StrikerNode(Node):
             self.target_uuid = msg.target_uuid
             if self.state == "IDLE":
                 self.get_logger().info(f"ENGAGING TARGET: {self.target_uuid}")
-                self.set_mode("GUIDED")
+                # Асинхронно устанавливаем режим
+                asyncio.create_task(self.set_mode("GUIDED"))
                 self.state = "APPROACH"
 
     def overlay_cb(self, msg):
@@ -106,8 +108,6 @@ class StrikerNode(Node):
         # Проверяем, что подсказка именно для нас (source_agent_id == striker_1)
         if msg.source_agent_id == self.agent_id:
             # Сохраняем подсказку.
-            # Можно добавить фильтр по классу, но обычно на терминальной стадии
-            # мы верим серверу, что это та самая цель.
             self.server_hint_bbox = (msg.x, msg.y, msg.w, msg.h)
             self.last_hint_time = time.time()
 
@@ -127,9 +127,6 @@ class StrikerNode(Node):
                 if (time.time() - self.last_hint_time < 0.5):  # Подсказка не старше 0.5 сек
 
                     nx, ny, nw, nh = self.server_hint_bbox
-                    # Проверка на адекватность (цель должна быть по центру, т.к. мы летим носом на неё)
-                    # if abs(nx - 0.5) < 0.3: ... (можно добавить такую защиту)
-
                     bbox = (int(nx * w), int(ny * h), int(nw * w), int(nh * h))
 
                     self.tracker = cv2.TrackerKCF_create()
@@ -172,13 +169,21 @@ class StrikerNode(Node):
 
         msg = PositionTarget()
         msg.coordinate_frame = PositionTarget.FRAME_BODY_NED
+        # CRITICAL FIX: To command Vel X, Vel Z, and Yaw Rate, use mask: 0x05C7 (0b0000010111000111)
+        # Ensure ArduPilot interprets this specifically as a velocity+yawrate body command.
         msg.type_mask = 0b0000010111000111
         msg.velocity.x = ATTACK_SPEED
 
         # Рулим (Yaw) и пикируем (Vel Z)
         msg.yaw_rate = -1.0 * PN_GAIN * (los_rate_x + 1.0 * error_x)
-        msg.velocity.z = (error_y * 10.0 + los_rate_y * PN_GAIN * 5.0)
-        msg.velocity.z = max(min(msg.velocity.z, 15.0), -5.0)
+        
+        # CRITICAL MATH FIX: Downward velocity (Z) in NED frame.
+        # Reduced aggressive PD gain (error_y * 10.0 -> error_y * 4.0) to prevent jerking.
+        proposed_z_vel = (error_y * 4.0 + los_rate_y * PN_GAIN * 2.0)
+        
+        # Clamped to safe multirotor dive limits: Max 5 m/s down, 2 m/s up. 
+        # (NED frame: Positive Z is DOWN)
+        msg.velocity.z = max(min(proposed_z_vel, 5.0), -2.0)
 
         self.vel_pub.publish(msg)
         self.prev_error_x, self.prev_error_y = error_x, error_y
@@ -187,8 +192,10 @@ class StrikerNode(Node):
     def fly_to_gps(self, target, alt):
         """Подлет по координатам"""
         msg = PositionTarget()
-        msg.coordinate_frame = PositionTarget.FRAME_GLOBAL_INT
-        msg.type_mask = 0b0000111111111000
+        # CRITICAL FIX: Change from FRAME_GLOBAL_INT to FRAME_GLOBAL_REL_ALT
+        msg.coordinate_frame = PositionTarget.FRAME_GLOBAL_REL_ALT
+        # CRITICAL FIX: Change from 0xFF8 (ignores yaw) to 0xDF8 (uses yaw)
+        msg.type_mask = 0b0000110111111000
         msg.lat_int = int(target[0] * 1e7)
         msg.lon_int = int(target[1] * 1e7)
         msg.alt = float(alt)
@@ -235,16 +242,52 @@ class StrikerNode(Node):
 
         self.stream_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    def set_mode(self, mode):
+    async def set_mode(self, mode):
         if self.set_mode_client.service_is_ready():
-            self.set_mode_client.call_async(SetMode.Request(custom_mode=mode))
+            req = SetMode.Request(custom_mode=mode)
+            try:
+                response = await self.set_mode_client.call_async(req)
+                return response.mode_sent
+            except Exception as e:
+                self.get_logger().error(f"SetMode exception: {e}")
+                return False
+        return False
+
+    async def arm(self):
+        if self.arming_client.service_is_ready():
+            req = CommandBool.Request(value=True)
+            try:
+                response = await self.arming_client.call_async(req)
+                return response.success
+            except Exception as e:
+                self.get_logger().error(f"Arming exception: {e}")
+                return False
+        return False
 
     def destroy_node(self):
         if self.stream_process: os.kill(self.stream_process.pid, signal.SIGKILL)
         super().destroy_node()
 
 
-def main(args=None):
+def main_loop(args=None):
     rclpy.init(args=args)
-    rclpy.spin(StrikerNode())
-    rclpy.shutdown()
+    node = StrikerNode()
+    
+    # Запускаем asyncio loop для поддержки асинхронных MAVROS вызовов
+    loop = asyncio.get_event_loop()
+    
+    # Обертка для запуска ROS 2 spin в фоне
+    import threading
+    spin_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
+    spin_thread.start()
+    
+    try:
+        loop.run_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+if __name__ == '__main__':
+    main_loop()

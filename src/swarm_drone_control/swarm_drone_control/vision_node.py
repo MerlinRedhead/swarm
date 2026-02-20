@@ -120,8 +120,10 @@ class VisionNode(Node):
         body_yaw = 0.0
 
         pos_msg = PositionTarget()
-        pos_msg.coordinate_frame = PositionTarget.FRAME_GLOBAL_INT
-        pos_msg.type_mask = 0b0000100111111000  # Pos + Yaw
+        # CRITICAL FIX: Change from FRAME_GLOBAL_INT to FRAME_GLOBAL_REL_ALT
+        pos_msg.coordinate_frame = PositionTarget.FRAME_GLOBAL_REL_ALT
+        # CRITICAL FIX: Change from 0xFF8 (ignores yaw) to 0xDF8 (uses yaw)
+        pos_msg.type_mask = 0b0000110111111000  # Pos + Yaw
 
         pos_msg.lat_int = int(target_lat * 1e7)
         pos_msg.lon_int = int(target_lon * 1e7)
@@ -149,12 +151,17 @@ class VisionNode(Node):
                 gimbal_pitch = -1.57  # Вертикально вниз
 
             # 3. Назначение углов
-            # MAV_MOUNT_MODE_MAVLINK_TARGETING обычно работает в Earth Frame (абсолютные углы)
-            # Если подвес в Body Frame, нужно вычесть body_yaw:
-            # gimbal_yaw = bearing - self.orientation[2]
-
-            # Предполагаем, что умный подвес (SIYI/Gremsy) понимает абсолютные углы
-            gimbal_yaw = bearing
+            # MAV_MOUNT_MODE_MAVLINK_TARGETING (2) в ArduPilot по умолчанию ожидает углы в Body Frame (относительно носа).
+            # Вычисляем относительный Yaw: (Азимут на цель) - (Текущий курс дрона)
+            # Приводим к диапазону [-pi, pi]
+            drone_yaw = self.orientation[2]
+            relative_yaw = bearing - drone_yaw
+            
+            # Нормализация угла
+            while relative_yaw > math.pi: relative_yaw -= 2.0 * math.pi
+            while relative_yaw < -math.pi: relative_yaw += 2.0 * math.pi
+            
+            gimbal_yaw = relative_yaw
 
         else:
             # Если цели нет - смотрим прямо по курсу дрона (0.0) и в горизонт

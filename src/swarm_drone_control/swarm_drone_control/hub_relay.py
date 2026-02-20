@@ -5,6 +5,7 @@ import time
 import math
 import os
 import yaml
+import asyncio
 from ament_index_python.packages import get_package_share_directory
 
 # ROS Messages
@@ -35,6 +36,7 @@ class HubRelayNode(Node):
         self.targets = {}  # {target_uuid: TargetRefined}
         self.current_gps = None
         self.mavros_state = State()
+        self.takeoff_in_progress = False
 
         # --- ПОДПИСКИ (ВХОДЯЩИЕ ДАННЫЕ) ---
         # 1. Своя телеметрия (Хаб сам летает!)
@@ -105,7 +107,7 @@ class HubRelayNode(Node):
         Хаб сохраняет её координаты. Атака начнется ТОЛЬКО по приказу НСУ.
         """
         self.targets[msg.target_id] = msg
-        # self.log(f"Target tracked: {msg.target_id}")
+        self.log(f"Target tracked: {msg.target_id}")
 
     def nsu_command_cb(self, msg):
         """
@@ -116,42 +118,35 @@ class HubRelayNode(Node):
         self.log(f"NSU COMMAND: {cmd_type} -> {msg.recipient_id}")
 
         if cmd_type == "DEPLOY":
-            # Перелет роя в зону интереса (В СТРОЮ)
             center_lat = msg.param_1
             center_lon = msg.param_2
             self.move_swarm_formation(center_lat, center_lon)
 
         elif cmd_type == "ATTACK":
-            # Атака конкретной цели
             target_uuid = msg.target_uuid
             self.coordinate_attack(target_uuid)
 
         elif cmd_type == "TAKEOFF":
-            # Взлет всего роя
-            alt = msg.param_3 if msg.param_3 > 0 else SWARM_ALTITUDE_DEFAULT
-            self.swarm_takeoff(alt)
+            if not self.takeoff_in_progress:
+                alt = msg.param_3 if msg.param_3 > 0 else SWARM_ALTITUDE_DEFAULT
+                # Запускаем асинхронную задачу в фоне, чтобы не блокировать ROS Executor
+                asyncio.create_task(self.swarm_takeoff_sequence(alt))
+            else:
+                self.log("Takeoff already in progress. Ignoring command.")
 
         elif cmd_type == "RTB":
-            # Возврат на базу
             self.return_to_base()
 
     # --- ЛОГИКА СТРОЯ (FORMATION FLIGHT) ---
     def move_swarm_formation(self, center_lat, center_lon):
-        """
-        Рассчитывает целевую точку для КАЖДОГО дрона на основе config.yaml
-        и отправляет их всех (включая себя) в полет.
-        """
+        """Рассчитывает целевую точку для КАЖДОГО дрона на основе config.yaml"""
         if not self.formation_config:
             self.log("ERROR: Formation config missing!")
             return
 
         self.log(f"MOVING SWARM TO: {center_lat:.6f}, {center_lon:.6f}")
 
-        # Проходим по всем агентам в конфиге (hub, scout_1, striker_1...)
         for role_id, offsets in self.formation_config.items():
-
-            # 1. Расчет смещения GPS
-            # Offsets: x (North), y (East) в метрах
             off_x = offsets.get('x', 0.0)
             off_y = offsets.get('y', 0.0)
             off_z = offsets.get('z', SWARM_ALTITUDE_DEFAULT)
@@ -162,34 +157,25 @@ class HubRelayNode(Node):
             target_lat = center_lat + d_lat
             target_lon = center_lon + d_lon
 
-            # 2. Раздача команд
             if role_id == self.agent_id:
-                # Хаб летит сам (через MAVROS)
+                # Хаб летит сам
                 self.fly_me_to(target_lat, target_lon, off_z)
             else:
-                # Хаб командует другим (через SwarmTask)
-                # Тип задачи SCOUT_POINT означает "лететь и ждать/наблюдать"
+                # Хаб командует другим
                 self.send_task(role_id, "SCOUT_POINT", target_lat, target_lon, off_z)
 
     # --- ЛОГИКА АТАКИ (HUNTER-KILLER) ---
     def coordinate_attack(self, target_uuid):
-        """
-        Связка: Ударник атакует, Разведчик (Споттер) корректирует.
-        """
+        """Связка: Ударник атакует, Разведчик (Споттер) корректирует."""
         if target_uuid not in self.targets:
             self.log(f"ERROR: Target {target_uuid} lost or invalid ID")
             return
 
         target = self.targets[target_uuid]
 
-        # 1. Выбор Ударника (ближайший свободный)
         striker = self.find_best_agent("striker", "IDLE", target.lat, target.lon)
-
-        # 2. Выбор Споттера (ближайший, который видит цель)
-        # В идеале берем того, кто эту цель и заметил (target_uuid содержит ID дрона)
-        spotter_hint = target_uuid.split('_')[0] + "_" + target_uuid.split('_')[1]  # vision_1
-        spotter = spotter_hint if spotter_hint in self.agents else self.find_best_agent("vision", "ACTIVE", target.lat,
-                                                                                        target.lon)
+        spotter_hint = target_uuid.split('_')[0] + "_" + target_uuid.split('_')[1]
+        spotter = spotter_hint if spotter_hint in self.agents else self.find_best_agent("vision", "ACTIVE", target.lat, target.lon)
 
         if not striker:
             self.log("NO STRIKERS AVAILABLE!")
@@ -197,61 +183,102 @@ class HubRelayNode(Node):
 
         self.log(f"ENGAGING {target_uuid}: Striker={striker}, Spotter={spotter}")
 
-        # 3. Приказ Ударнику: STRIKE (Включает PN-наведение)
-        # Передаем UUID цели, чтобы ударник знал, какой бокс трекать
         self.send_task(striker, "STRIKE", target.lat, target.lon, 0.0, target_uuid)
 
-        # 4. Приказ Споттеру: TRACK (Повернуть камеру на цель)
         if spotter:
-            # Споттер должен висеть на месте (или кружить) и держать цель в фокусе
-            # Мы отправляем ему координаты цели, vision_node повернет гимбал
             self.send_task(spotter, "SCOUT_POINT", target.lat, target.lon, SWARM_ALTITUDE_DEFAULT, target_uuid)
 
     # --- НИЗКОУРОВНЕВОЕ УПРАВЛЕНИЕ ---
     def fly_me_to(self, lat, lon, alt):
         """Полет самого Хаба"""
+        # Если находимся на земле - игнорируем, либо заставляем взлететь
+        if not self.mavros_state.armed:
+           self.log("Cannot fly_to: HUB is not armed!")
+           return
+           
         if self.mavros_state.mode != "GUIDED":
-            self.set_mode("GUIDED")
+            asyncio.create_task(self.set_mode("GUIDED"))
 
         msg = PositionTarget()
-        msg.coordinate_frame = PositionTarget.FRAME_GLOBAL_INT
-        msg.type_mask = 0b0000111111111000  # Ignore Vel/Accel, use Pos
+        # CRITICAL FIX: FRAME_GLOBAL_REL_ALT (6) instead of FRAME_GLOBAL_INT (5). 
+        # 5 expects Altitude Above Sea Level. 6 expects Altitude above Home.
+        msg.coordinate_frame = PositionTarget.FRAME_GLOBAL_REL_ALT
+        
+        # CRITICAL FIX: type_mask 0x0DF8 (ignore velocity/accel/yaw_rate, keeping pos and yaw)
+        # Previously ignored yaw, which means drone would fly sideways.
+        msg.type_mask = 0b0000110111111000 
+        
         msg.lat_int = int(lat * 1e7)
         msg.lon_int = int(lon * 1e7)
         msg.alt = float(alt)
-        # Устанавливаем Yaw на цель (опционально) или по курсу
+        
+        # Opcional: Calculate heading (yaw) towards destination
+        if self.current_gps:
+             dy = (lon - self.current_gps.longitude) * math.cos(math.radians(self.current_gps.latitude))
+             dx = lat - self.current_gps.latitude
+             msg.yaw = math.atan2(dy, dx)
+        else:
+             msg.yaw = 0.0
+
         self.global_pos_pub.publish(msg)
 
-    def swarm_takeoff(self, alt):
-        """Команда на взлет всем (включая Хаб)"""
+    async def swarm_takeoff_sequence(self, alt):
+        """Безопасная асинхронная процедура взлета (Без time.sleep()!)."""
+        self.takeoff_in_progress = True
         self.log(f"SWARM TAKEOFF SEQUENCE. Alt: {alt}m")
 
-        # 1. Взлет Хаба
-        self.set_mode("GUIDED")
-        self.arm()
-        time.sleep(2)
+        # 1. Установка режима GUIDED для Ардупилота
+        success = await self.set_mode("GUIDED")
+        if not success:
+            self.log("Takeoff Aborted: Failed to set GUIDED mode.")
+            self.takeoff_in_progress = False
+            return
 
-        # Используем сервис Takeoff для себя
+        # 2. Попытка Arming
+        success = await self.arm()
+        if not success:
+            self.log("Takeoff Aborted: ARMING REJECTED by ArduPilot.")
+            self.takeoff_in_progress = False
+            return
+            
+        # Даем Ардупилоту время осознать, что он вооружен (асинхронный слип)
+        await asyncio.sleep(2.0)
+        
+        # Двойная проверка, что моторы крутятся
+        if not self.mavros_state.armed:
+            self.log("Takeoff Aborted: Drone disarmed automatically.")
+            self.takeoff_in_progress = False
+            return
+
+        # 3. Команда Takeoff
         if self.takeoff_client.service_is_ready():
             req = CommandTOL.Request()
             req.altitude = float(alt)
             req.latitude = float('nan')
             req.longitude = float('nan')
-            self.takeoff_client.call_async(req)
+            
+            self.log("Commanding HUB takeoff...")
+            try:
+                # Асинхронный вызов сервиса ROS2
+                response = await self.takeoff_client.call_async(req)
+                if response.success:
+                    self.log("HUB TAKEOFF SUCCESSFUL")
+                else:
+                    self.log("HUB TAKEOFF FAILED/REJECTED")
+            except Exception as e:
+                self.log(f"Takeoff Service Exception: {e}")
+        else:
+            self.log("Takeoff service not available!")
 
-        # 2. Взлет остальных (через Task)
-        # В данном упрощении мы шлем SCOUT_POINT на текущие координаты + высота
-        # В идеале нужен отдельный тип команды TAKEOFF в SwarmTask
-        # Но пока используем логику "лети в строй"
+        # 4. Взлет остальных (раздаем задачи рою)
         if self.current_gps:
             self.move_swarm_formation(self.current_gps.latitude, self.current_gps.longitude)
+            
+        self.takeoff_in_progress = False
 
     def return_to_base(self):
         self.log("SWARM RTB INITIATED")
-        self.set_mode("RTL")  # Хаб домой
-        # Остальным тоже командуем RTL (если реализовано в дронах)
-        # Или шлем их в точку сбора (Launch Point)
-        pass
+        asyncio.create_task(self.set_mode("RTL"))  # Хаб домой
 
     # --- ВСПОМОГАТЕЛЬНЫЕ ---
     def send_task(self, agent_id, type_str, lat, lon, alt, target_uuid=""):
@@ -269,27 +296,60 @@ class HubRelayNode(Node):
         best = None
         min_dist = float('inf')
         for aid, info in self.agents.items():
-            if role in aid and (status_req in info.role or status_req == "ANY"):  # info.role из AgentStatus
+            if role in aid and (status_req in info.role or status_req == "ANY"):
                 dist = (info.lat - lat) ** 2 + (info.lon - lon) ** 2
                 if dist < min_dist:
                     min_dist = dist
                     best = aid
         return best
 
-    def set_mode(self, mode):
+    async def set_mode(self, mode):
         if self.set_mode_client.service_is_ready():
-            self.set_mode_client.call_async(SetMode.Request(custom_mode=mode))
+            req = SetMode.Request(custom_mode=mode)
+            try:
+                response = await self.set_mode_client.call_async(req)
+                return response.mode_sent
+            except Exception as e:
+                self.log(f"SetMode exception: {e}")
+                return False
+        return False
 
-    def arm(self):
+    async def arm(self):
         if self.arming_client.service_is_ready():
-            self.arming_client.call_async(CommandBool.Request(value=True))
+            req = CommandBool.Request(value=True)
+            try:
+                response = await self.arming_client.call_async(req)
+                return response.success
+            except Exception as e:
+                self.log(f"Arming exception: {e}")
+                return False
+        return False
 
     def log(self, text):
         self.get_logger().info(text)
         self.log_pub.publish(String(data=text))
 
 
-def main(args=None):
+def main_loop(args=None):
     rclpy.init(args=args)
-    rclpy.spin(HubRelayNode())
-    rclpy.shutdown()
+    node = HubRelayNode()
+    
+    # Запускаем asyncio loop для поддержки асинхронных MAVROS вызовов
+    loop = asyncio.get_event_loop()
+    
+    # Обертка для запуска ROS 2 spin в фоне
+    import threading
+    spin_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
+    spin_thread.start()
+    
+    try:
+        loop.run_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main_loop()
