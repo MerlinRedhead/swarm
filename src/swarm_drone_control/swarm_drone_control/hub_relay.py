@@ -14,6 +14,7 @@ from sensor_msgs.msg import NavSatFix
 from mavros_msgs.msg import State, PositionTarget
 from mavros_msgs.srv import CommandBool, SetMode, CommandTOL
 from swarm_interfaces.msg import SwarmTask, AgentStatus, TargetRefined, SwarmCommand
+from rclpy.qos import qos_profile_sensor_data
 
 # --- КОНСТАНТЫ ---
 EARTH_RADIUS = 6378137.0
@@ -40,14 +41,14 @@ class HubRelayNode(Node):
 
         # --- ПОДПИСКИ (ВХОДЯЩИЕ ДАННЫЕ) ---
         # 1. Своя телеметрия (Хаб сам летает!)
-        self.create_subscription(NavSatFix, 'mavros/global_position/global', self.gps_cb, 10)
-        self.create_subscription(State, 'mavros/state', self.state_cb, 10)
+        self.create_subscription(NavSatFix, 'mavros/global_position/global', self.gps_cb, qos_profile_sensor_data)
+        self.create_subscription(State, 'mavros/state', self.state_cb, qos_profile_sensor_data)
 
         # 2. Статусы подчиненных дронов
-        self.create_subscription(AgentStatus, '/swarm/agent_status', self.agent_status_cb, 10)
+        self.create_subscription(AgentStatus, '/swarm/agent_status', self.agent_status_cb, qos_profile_sensor_data)
 
         # 3. Цели от YOLO (Сервер)
-        self.create_subscription(TargetRefined, '/swarm/target_global', self.target_cb, 10)
+        self.create_subscription(TargetRefined, '/swarm/target_global', self.target_cb, qos_profile_sensor_data)
 
         # 4. Глобальные команды от НСУ (Карта/Оператор)
         self.create_subscription(SwarmCommand, '/swarm/global_command', self.nsu_command_cb, 10)

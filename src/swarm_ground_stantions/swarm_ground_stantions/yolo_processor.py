@@ -15,6 +15,7 @@ from ultralytics import YOLO
 # Импорт сообщений
 from swarm_interfaces.msg import TargetRefined, GuiOverlay, AgentStatus
 from std_msgs.msg import Header
+from rclpy.qos import qos_profile_sensor_data
 
 # --- КОНСТАНТЫ ---
 EARTH_RADIUS = 6378137.0
@@ -266,9 +267,13 @@ def stream_process_worker(agent_id, model_path, telem_dict, running_flag,
 
     reader.release()
     if process:
-        process.stdin.close()
+        try:
+            process.stdin.close()
+        except:
+            pass
+        process.kill()
         process.wait()
-    log(f"Worker process termianted.")
+    log(f"Worker process terminated.")
 
 
 # --- ГЛАВНЫЙ ROS УЗЕЛ ---
@@ -293,9 +298,9 @@ class YoloProcessorNode(Node):
         self.running_flags = {}
         self.local_buffers = {}
 
-        self.create_subscription(AgentStatus, '/swarm/agent_status', self.agent_status_cb, 10)
-        self.target_pub = self.create_publisher(TargetRefined, '/swarm/target_global', 10)
-        self.overlay_pub = self.create_publisher(GuiOverlay, '/swarm/gui_overlay', 10)
+        self.create_subscription(AgentStatus, '/swarm/agent_status', self.agent_status_cb, qos_profile_sensor_data)
+        self.target_pub = self.create_publisher(TargetRefined, '/swarm/target_global', qos_profile_sensor_data)
+        self.overlay_pub = self.create_publisher(GuiOverlay, '/swarm/gui_overlay', qos_profile_sensor_data)
         
         # Таймер для вычитывания очередей от рабочих процессов (100 Hz)
         self.create_timer(0.01, self.dispatch_queues_cb)
@@ -385,6 +390,10 @@ class YoloProcessorNode(Node):
             p.join(timeout=2.0)
             if p.is_alive():
                 p.terminate()
+                p.join(timeout=1.0)
+                if p.is_alive():
+                    p.kill()
+
                 
         super().destroy_node()
 

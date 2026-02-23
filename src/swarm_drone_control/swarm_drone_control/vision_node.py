@@ -14,6 +14,7 @@ from sensor_msgs.msg import NavSatFix, BatteryState, Imu
 from mavros_msgs.msg import State, PositionTarget, MountControl
 from swarm_interfaces.msg import AgentStatus, SwarmTask, GimbalState
 from std_msgs.msg import Header
+from rclpy.qos import qos_profile_sensor_data
 
 
 class VisionNode(Node):
@@ -47,19 +48,19 @@ class VisionNode(Node):
         self.gimbal_rpy = [0.0, 0.0, 0.0]
 
         # --- ПОДПИСКИ ---
-        self.create_subscription(NavSatFix, 'mavros/global_position/global', self.gps_cb, 10)
-        self.create_subscription(State, 'mavros/state', self.state_cb, 10)
-        self.create_subscription(BatteryState, 'mavros/battery', self.batt_cb, 10)
-        self.create_subscription(Imu, 'mavros/imu/data', self.imu_cb, 10)
+        self.create_subscription(NavSatFix, 'mavros/global_position/global', self.gps_cb, qos_profile_sensor_data)
+        self.create_subscription(State, 'mavros/state', self.state_cb, qos_profile_sensor_data)
+        self.create_subscription(BatteryState, 'mavros/battery', self.batt_cb, qos_profile_sensor_data)
+        self.create_subscription(Imu, 'mavros/imu/data', self.imu_cb, qos_profile_sensor_data)
         self.create_subscription(SwarmTask, '/swarm/task_assignment', self.task_cb, 10)
 
         # --- ПУБЛИКАЦИИ ---
-        self.status_pub = self.create_publisher(AgentStatus, '/swarm/agent_status', 10)
+        self.status_pub = self.create_publisher(AgentStatus, '/swarm/agent_status', qos_profile_sensor_data)
         # Публикуем состояние подвеса (ты скидывал GimbalState.msg)
-        self.gimbal_pub = self.create_publisher(GimbalState, '/swarm/gimbal_state', 10)
+        self.gimbal_pub = self.create_publisher(GimbalState, '/swarm/gimbal_state', qos_profile_sensor_data)
 
-        self.pos_pub = self.create_publisher(PositionTarget, 'mavros/setpoint_position/global', 10)
-        self.mount_pub = self.create_publisher(MountControl, 'mavros/mount_control', 10)
+        self.pos_pub = self.create_publisher(PositionTarget, 'mavros/setpoint_position/global', qos_profile_sensor_data)
+        self.mount_pub = self.create_publisher(MountControl, 'mavros/mount_control', qos_profile_sensor_data)
 
         # Таймеры
         self.create_timer(0.1, self.publish_status)  # 10 Гц телеметрия

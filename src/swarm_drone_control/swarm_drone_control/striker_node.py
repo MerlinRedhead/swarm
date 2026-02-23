@@ -15,6 +15,7 @@ from sensor_msgs.msg import NavSatFix, Image
 from mavros_msgs.msg import State, PositionTarget
 from mavros_msgs.srv import CommandBool, SetMode
 from swarm_interfaces.msg import AgentStatus, SwarmTask, GuiOverlay
+from rclpy.qos import qos_profile_sensor_data
 
 # --- КОНСТАНТЫ БОЕВОЙ ЧАСТИ ---
 SAFE_ALTITUDE = 30.0  # Высота подлета
@@ -59,17 +60,17 @@ class StrikerNode(Node):
         self.last_loop_time = self.get_clock().now()
 
         # --- ПОДПИСКИ ---
-        self.create_subscription(NavSatFix, 'mavros/global_position/global', self.gps_cb, 10)
-        self.create_subscription(State, 'mavros/state', self.state_cb, 10)
+        self.create_subscription(NavSatFix, 'mavros/global_position/global', self.gps_cb, qos_profile_sensor_data)
+        self.create_subscription(State, 'mavros/state', self.state_cb, qos_profile_sensor_data)
         self.create_subscription(SwarmTask, '/swarm/task_assignment', self.task_cb, 10)
 
         # Камера (для трекера) и Оверлей (для подсказки)
-        self.create_subscription(Image, '/camera/image_raw', self.image_cb, 10)
-        self.create_subscription(GuiOverlay, '/swarm/gui_overlay', self.overlay_cb, 10)
+        self.create_subscription(Image, '/camera/image_raw', self.image_cb, 10) # Картинки лучше оставлять как есть или использовать специальный QoS
+        self.create_subscription(GuiOverlay, '/swarm/gui_overlay', self.overlay_cb, qos_profile_sensor_data)
 
         # --- ПУБЛИКАЦИИ ---
-        self.status_pub = self.create_publisher(AgentStatus, '/swarm/agent_status', 10)
-        self.vel_pub = self.create_publisher(PositionTarget, 'mavros/setpoint_raw/local', 10)
+        self.status_pub = self.create_publisher(AgentStatus, '/swarm/agent_status', qos_profile_sensor_data)
+        self.vel_pub = self.create_publisher(PositionTarget, 'mavros/setpoint_raw/local', qos_profile_sensor_data)
 
         # Сервисы
         self.set_mode_client = self.create_client(SetMode, 'mavros/set_mode')
